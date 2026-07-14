@@ -1,0 +1,1091 @@
+---
+title: "Satislarin analizi"
+author: "Ceyhun Mammadov"
+date: "2026-07-14"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+<script>
+   $(document).ready(function() {
+     $head = $('#header');
+     $head.prepend('<img src=\"https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSz_jDCqViuhn1wzC61xiunhSMUcq2V21gInA&s\" style=\"float: right;width: 300px;\"/>')
+   });
+</script>
+
+## Temizlik ve Join
+
+```{r k, error=FALSE, message=FALSE, warning=FALSE, echo=TRUE, include=TRUE}
+
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(purrr)
+library(stringi)
+
+setwd("C:/RR")
+ 
+sort_words <- function(text_vector) {
+  map_chr(text_vector, function(x) {
+    if (is.na(x)) return(NA)
+    words <- str_split(x, "\\s+")[[1]]
+    words <- words[words != ""]
+    if (length(words) == 0) return(NA)
+    paste(sort(words), collapse = " ")
+  })
+}
+
+
+clean_product_name_v9 <- function(x) {
+  x <- toupper(x)
+  
+  # --- Sistem/ucot zibili: bunlar real mehsul deyil, NA qaytarilir ---
+  is_junk <- str_detect(
+    x,
+    "\\b(SERBEST SATIS|SERBEST TICARET|EDV [0-9]+|ERZAQ|MEHSUL)\\b"
+  ) | str_trim(x) == "SIQARET"
+  x[is_junk] <- NA
+  
+  # --- Herflerin standartlasdirilmasi ---
+  # (E=\u018f, S=\u015e, C=\u00c7, G=\u011e, O=\u00d6, U=\u00dc, I=\u0130)
+  x <- str_replace_all(x, "\u018f", "E")
+  x <- str_replace_all(x, "\u015e", "S")
+  x <- str_replace_all(x, "\u00c7", "C")
+  x <- str_replace_all(x, "\u011e", "G")
+  x <- str_replace_all(x, "\u00d6", "O")
+  x <- str_replace_all(x, "\u00dc", "U")
+  x <- str_replace_all(x, "\u0130", "I")
+  
+  # --- Vergulu onluq noqteye cevir (reqem-reqem arasinda): 0,5 -> 0.5 ---
+  x <- str_replace_all(x, "([0-9]),([0-9])", "\\1.\\2")
+  
+  # --- Cografi / dialekt / sive sinonimleri ---
+  x <- str_replace_all(x, "\\bKUBA\\b", "QUBA")
+  x <- str_replace_all(x, "\\bSHEKER\\b", "SEKER")
+  x <- str_replace_all(x, "\\bPORTAGAL\\b", "PORTAXAL")
+  x <- str_replace_all(x, "\\bCOREYI\\b", "COREK")
+  x <- str_replace_all(x, "\\bSOQAN\\b", "SOGAN")
+  x <- str_replace_all(x, "\\bMIRIT\\b", "MELIT")
+  x <- str_replace_all(x, "\\bPESOK\\b", "SEKER TOZU")
+  x <- str_replace_all(x, "\\bPESOQ\\b", "SEKER TOZU")
+  x <- str_replace_all(x, "\\bDOLMALIG\\b", "DOLMALIQ")
+  
+  # --- Tesviri / artiq sozler ---
+  x <- str_replace_all(x, "\\bSIQ\\.", "")
+  x <- str_replace_all(x, "\\b(SIQARET|ENDIRIMLI|AKSIYA|HEDIYYE|ICKI|ICKISI|ICECEGI|ENERJI|MB|KAPSUL|QARAGAT|SUPER|TEZE|SADE|BALACA|YENI|ED|EDED|EDEDLI|CEKI|PACKA|MENYU|IRI|BOYUK|XIRDA|ACIK|ACIQ)\\b", "")
+  
+  # --- Qablasdirma/marketinq sozleri (uygunluga mane olan) ---
+  x <- str_replace_all(x, "\\b(PET|TETRAPAK|TETRAPACK|TP|CAM|SUSE|ARAQ|ALC|SB|DQ|D/Q)\\b", "")
+  
+  # --- Zibil simvollari ---
+  x <- str_replace_all(x, "[().,_*\\-\u2013+=?&%]", " ")
+  x <- str_replace_all(x, "\u2116", "N")
+  
+  # --- Dukan prefikslerini ZENCIRVARI sil (qosa prefiksler ucun) ---
+  for (i in 1:3) {
+    x <- str_replace_all(x, "^(SF|MVT|GM|MT|M/T|M T|GY|ST)[.\\s\\-]+", "")
+    x <- str_trim(x)
+  }
+  
+  # --- Olcu vahidlerini standartlasdir (BOSLUGU SAXLAYARAQ - bug duzeldildi) ---
+  x <- str_replace_all(x, "\\b(LT|LITR)\\b", "L")
+  x <- str_replace_all(x, "\\b(MILLILITR)\\b", "ML")
+  x <- str_replace_all(x, "\\b(KQ|KILOQRAM)\\b", "KG")
+  x <- str_replace_all(x, "\\b(QR|QRAM)\\b", "GR")
+  x <- str_replace_all(x, "([0-9])\\s+(L|ML|KG|GR)\\b", "\\1\\2")
+  
+  # --- Elave temizleme: yalniz herf/reqem/bosluq/noqte saxla ---
+  x <- str_replace_all(x, "[^A-Z0-9. ]", "")
+  x <- str_replace_all(x, "\\.", "")
+  x <- str_squish(x)
+  
+  # --- Sozleri elifba sirasina sal ---
+  x <- sort_words(x)
+  
+  # Bos setirleri NA et
+  x[x == ""] <- NA
+  
+  return(x)
+}
+
+
+cat("Datalari oxuyuruq...\n")
+map_data <- readRDS("fp_map.rds")
+receipts_data <- readRDS("fp_receipts.rds")
+
+map_data$product <- stringi::stri_enc_toutf8(map_data$product, is_unknown_8bit = TRUE, validate = TRUE)
+receipts_data$product_name <- stringi::stri_enc_toutf8(receipts_data$product_name, is_unknown_8bit = TRUE, validate = TRUE)
+
+cat("V9 temizleme alqoritmi icra olunur (bu bir nece deqiqe ceke biler)...\n")
+
+receipts_clean <- receipts_data %>%
+  mutate(
+    period = year(rec_date) * 100 + month(rec_date),
+    product_clean = clean_product_name_v9(product_name)
+  )
+
+map_clean <- map_data %>%
+  mutate(product_clean = clean_product_name_v9(product)) %>%
+  filter(!is.na(product_clean)) %>%
+  distinct(product_clean, period, .keep_all = TRUE)
+
+merged_data <- receipts_clean %>%
+  left_join(map_clean, by = c("product_clean" = "product_clean", "period" = "period")) %>%
+  mutate(
+    total_sales = qnt * unit_price,
+    total_profit = total_sales * profit_margin
+  )
+
+# Yaddasi temizleyirik
+rm(map_data, receipts_data, map_clean, receipts_clean)
+gc()
+
+n_total <- nrow(merged_data)
+n_matched <- sum(!is.na(merged_data$profit_margin))
+
+cat("\n========== NETICELER ==========\n")
+cat("Movcud setir sayi:", n_total, "\n")
+cat("Ugurla birlesen setir sayisi:", n_matched, "\n")
+cat("Birlesme faizi:", round(n_matched / n_total * 100, 1), "%\n")
+
+unmatched_top_100 <- merged_data %>%
+  filter(is.na(profit_margin)) %>%
+  count(product_name, sort = TRUE) %>%
+  head(100)
+
+View(unmatched_top_100)
+
+saveRDS(merged_data, file = "merged_data.rds")
+
+```
+
+
+## slayd 1
+
+>
+
+```{r t1, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+ 
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+
+normalize_pos <- function(x) {
+  x <- as.character(x)
+  x <- toupper(x)
+  x <- str_replace_all(x, "\u018F", "E")  # E -> E
+  x <- str_replace_all(x, "\u011E", "G")  # G -> G
+  x <- str_replace_all(x, "\u0130", "I")  # I -> I
+  x <- str_replace_all(x, "\u015E", "S")  # S -> S
+  x <- str_replace_all(x, "\u00C7", "C")  # C -> C
+  x <- str_replace_all(x, "\u00D6", "O")  # O -> O
+  x <- str_replace_all(x, "\u00DC", "U")  # U -> U
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " ")
+  x <- str_squish(x)
+  x
+}
+
+
+brand_rules <- tribble(
+  ~brand,            ~pattern,
+  "Araz",            "\\bARAZ\\b",
+  "Bravo",           "\\bBRAVO\\b",
+  "BazarStore",      "\\bBAZARSTORE\\b|\\bBAZAR STORE\\b",
+  "Oba",             "\\bOBA\\b",
+  "Spar",            "\\bSPAR\\b",
+  "King Smart",      "\\bKING ?SMART\\b",
+  "Bizim Market",    "\\bBIZIM MARKET\\b",
+  "Rahat Market",    "\\bRAHAT\\b",
+  "GrandMart",       "\\bGRAND ?MART\\b|\\bGRAND MARKET\\b",
+  "MegaStore",       "\\bMEGA ?STORE\\b",
+  "Neptun",          "\\bNEPTUN\\b",
+  "AvroMart",        "\\bAVROMART\\b",
+  "Qadiroglu",       "\\bQ[EA]DIROGLU\\b",
+  "Amine Market",    "\\bAMIN[EA]? MARKET\\b",
+  "En Ucuz",         "\\bEN UCUZ\\b",
+  "McDonalds",       "\\bMC ?DONALD",
+  "KFC",             "\\bKFC\\b",
+  "Premium",         "\\bPREMIUM\\b",
+  "Life Store",      "\\bLIFE STORE\\b|\\bLIFE CENTER\\b",
+  "Qayali",          "\\bQAYALI\\b",
+  "Sultan Market",   "\\bSULTAN MARKET\\b",
+  "A Plus",          "\\bA PLUS\\b",
+  "BolMart",         "\\bBOLMART\\b",
+  "Ekonom Market",   "\\bEKONOM MARKET\\b",
+  "Seda Store",      "\\bSEDA STORE\\b",
+  "Port Baku",       "\\bPORT BAKU\\b",
+  "Restoran",        "\\bRESTORAN\\b",
+  "Aptek",           "\\bAPTEK\\b",
+  "Erzaq Magazasi",  "\\bERZAQ MAGAZASI\\b",
+  "Magaza (umumi)",  "^MAGAZA$|\\bMAGAZASI\\b",
+  "Market (umumi)",  "\\bMARKET\\b"
+)
+
+assign_brand_vec <- function(norm_vec) {
+  result <- rep("Diger", length(norm_vec))
+  unassigned <- rep(TRUE, length(norm_vec))
+  for (i in seq_len(nrow(brand_rules))) {
+    idx <- which(unassigned)
+    if (length(idx) == 0) break
+    hit <- str_detect(norm_vec[idx], brand_rules$pattern[i])
+    result[idx[hit]] <- brand_rules$brand[i]
+    unassigned[idx[hit]] <- FALSE
+  }
+  result
+}
+
+
+pos_lookup <- tibble(pos = unique(merged$pos)) %>%
+  mutate(
+    pos_brand = assign_brand_vec(normalize_pos(pos)),
+    pos_brand = if_else(pos_brand %in% c("Market (umumi)", "Magaza (umumi)"),
+                        "Diger", pos_brand)
+  )
+
+merged <- merged %>% left_join(pos_lookup, by = "pos")
+
+
+brand_top10 <- merged %>%
+  filter(pos_brand != "Diger") %>%
+  group_by(pos_brand) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE)) %>%
+  arrange(desc(satis)) %>%
+  slice_head(n = 10)
+
+ggplot(brand_top10, aes(x = reorder(pos_brand, satis), y = satis)) +
+  geom_col(fill = "#378ADD") +
+  coord_flip() +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +   # <-- BU SETIR ELAVE OLUNDU
+  labs(title = "Top 10 Brend Uzre Umumi Satis",
+       x = NULL, y = "Satis (mln AZN)") +
+  theme_minimal(base_size = 13)
+
+```
+
+## slayd 2
+
+>
+
+```{r t2, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+normalize_pos <- function(x) {
+  x <- as.character(x); x <- toupper(x)
+  x <- str_replace_all(x, "\u018F", "E"); x <- str_replace_all(x, "\u011E", "G")
+  x <- str_replace_all(x, "\u0130", "I"); x <- str_replace_all(x, "\u015E", "S")
+  x <- str_replace_all(x, "\u00C7", "C"); x <- str_replace_all(x, "\u00D6", "O")
+  x <- str_replace_all(x, "\u00DC", "U")
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " "); str_squish(x)
+}
+
+brand_rules <- tribble(
+  ~brand,            ~pattern,
+  "Araz",            "\\bARAZ\\b",
+  "Bravo",           "\\bBRAVO\\b",
+  "BazarStore",      "\\bBAZARSTORE\\b|\\bBAZAR STORE\\b",
+  "Oba",             "\\bOBA\\b",
+  "Spar",            "\\bSPAR\\b",
+  "King Smart",      "\\bKING ?SMART\\b",
+  "Bizim Market",    "\\bBIZIM MARKET\\b",
+  "Rahat Market",    "\\bRAHAT\\b",
+  "GrandMart",       "\\bGRAND ?MART\\b|\\bGRAND MARKET\\b",
+  "MegaStore",       "\\bMEGA ?STORE\\b",
+  "Neptun",          "\\bNEPTUN\\b",
+  "AvroMart",        "\\bAVROMART\\b",
+  "Qadiroglu",       "\\bQ[EA]DIROGLU\\b",
+  "Amine Market",    "\\bAMIN[EA]? MARKET\\b",
+  "En Ucuz",         "\\bEN UCUZ\\b",
+  "McDonalds",       "\\bMC ?DONALD",
+  "KFC",             "\\bKFC\\b",
+  "Premium",         "\\bPREMIUM\\b",
+  "Life Store",      "\\bLIFE STORE\\b|\\bLIFE CENTER\\b",
+  "Qayali",          "\\bQAYALI\\b",
+  "Sultan Market",   "\\bSULTAN MARKET\\b",
+  "A Plus",          "\\bA PLUS\\b",
+  "BolMart",         "\\bBOLMART\\b",
+  "Ekonom Market",   "\\bEKONOM MARKET\\b",
+  "Seda Store",      "\\bSEDA STORE\\b",
+  "Port Baku",       "\\bPORT BAKU\\b",
+  "Restoran",        "\\bRESTORAN\\b",
+  "Aptek",           "\\bAPTEK\\b",
+  "Erzaq Magazasi",  "\\bERZAQ MAGAZASI\\b",
+  "Magaza (umumi)",  "^MAGAZA$|\\bMAGAZASI\\b",
+  "Market (umumi)",  "\\bMARKET\\b"
+)
+
+assign_brand_vec <- function(nv) {
+  res <- rep("Diger", length(nv)); un <- rep(TRUE, length(nv))
+  for (i in seq_len(nrow(brand_rules))) {
+    idx <- which(un); if (length(idx) == 0) break
+    hit <- str_detect(nv[idx], brand_rules$pattern[i])
+    res[idx[hit]] <- brand_rules$brand[i]; un[idx[hit]] <- FALSE
+  }
+  res
+}
+
+pos_lookup <- tibble(pos = unique(merged$pos)) %>%
+  mutate(
+    pos_brand = assign_brand_vec(normalize_pos(pos)),
+    pos_brand = if_else(pos_brand %in% c("Market (umumi)", "Magaza (umumi)"),
+                        "Diger", pos_brand)
+  )
+merged <- merged %>% left_join(pos_lookup, by = "pos")
+
+brand_bottom10 <- merged %>%
+  filter(pos_brand != "Diger") %>%
+  group_by(pos_brand) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE)) %>%
+  arrange(satis) %>%       # artan sira - en az evvel
+  slice_head(n = 10)
+
+ggplot(brand_bottom10, aes(x = reorder(pos_brand, -satis), y = satis)) +
+  geom_col(fill = "#378ADD") +
+  geom_text(aes(label = paste0(round(satis / 1e3), "K")),
+            hjust = -0.15, size = 3.5, color = "grey30") +
+  coord_flip() +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "K"),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Bottom 10 Brend Uzre Umumi Satis ",
+       x = NULL, y = "Satis (min AZN)") +
+  theme_minimal(base_size = 13)
+
+
+```
+
+
+## slayd 3
+
+>
+
+```{r t3, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Gunluk umumi satis
+daily <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  group_by(rec_date) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE))
+
+# Sade xett qrafiki
+ggplot(daily, aes(x = rec_date, y = satis)) +
+  geom_line(color = "#378ADD", linewidth = 0.9) +
+  geom_point(color = "#185FA5", size = 1.8) +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 days") +
+  labs(title = "Gunluk Umumi Satis (19 Apr - 31 May 2024)",
+       x = NULL, y = "Satis (mln AZN)") +
+  theme_minimal(base_size = 13)
+
+```
+
+
+## slayd 4
+
+
+>
+
+```{r t4, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+normalize_pos <- function(x) {
+  x <- as.character(x); x <- toupper(x)
+  x <- str_replace_all(x, "\u018F", "E"); x <- str_replace_all(x, "\u011E", "G")
+  x <- str_replace_all(x, "\u0130", "I"); x <- str_replace_all(x, "\u015E", "S")
+  x <- str_replace_all(x, "\u00C7", "C"); x <- str_replace_all(x, "\u00D6", "O")
+  x <- str_replace_all(x, "\u00DC", "U")
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " "); str_squish(x)
+}
+
+brand_rules <- tribble(
+  ~brand,            ~pattern,
+  "Araz",            "\\bARAZ\\b",
+  "Bravo",           "\\bBRAVO\\b",
+  "BazarStore",      "\\bBAZARSTORE\\b|\\bBAZAR STORE\\b",
+  "Oba",             "\\bOBA\\b",
+  "Spar",            "\\bSPAR\\b",
+  "King Smart",      "\\bKING ?SMART\\b",
+  "Bizim Market",    "\\bBIZIM MARKET\\b",
+  "Rahat Market",    "\\bRAHAT\\b",
+  "GrandMart",       "\\bGRAND ?MART\\b|\\bGRAND MARKET\\b",
+  "MegaStore",       "\\bMEGA ?STORE\\b",
+  "Neptun",          "\\bNEPTUN\\b",
+  "AvroMart",        "\\bAVROMART\\b",
+  "Qadiroglu",       "\\bQ[EA]DIROGLU\\b",
+  "Amine Market",    "\\bAMIN[EA]? MARKET\\b",
+  "En Ucuz",         "\\bEN UCUZ\\b",
+  "McDonalds",       "\\bMC ?DONALD",
+  "KFC",             "\\bKFC\\b",
+  "Premium",         "\\bPREMIUM\\b",
+  "Life Store",      "\\bLIFE STORE\\b|\\bLIFE CENTER\\b",
+  "Qayali",          "\\bQAYALI\\b",
+  "Sultan Market",   "\\bSULTAN MARKET\\b",
+  "A Plus",          "\\bA PLUS\\b",
+  "BolMart",         "\\bBOLMART\\b",
+  "Ekonom Market",   "\\bEKONOM MARKET\\b",
+  "Seda Store",      "\\bSEDA STORE\\b",
+  "Port Baku",       "\\bPORT BAKU\\b",
+  "Restoran",        "\\bRESTORAN\\b",
+  "Aptek",           "\\bAPTEK\\b",
+  "Erzaq Magazasi",  "\\bERZAQ MAGAZASI\\b",
+  "Magaza (umumi)",  "^MAGAZA$|\\bMAGAZASI\\b",
+  "Market (umumi)",  "\\bMARKET\\b"
+)
+
+assign_brand_vec <- function(nv) {
+  res <- rep("Diger", length(nv)); un <- rep(TRUE, length(nv))
+  for (i in seq_len(nrow(brand_rules))) {
+    idx <- which(un); if (length(idx) == 0) break
+    hit <- str_detect(nv[idx], brand_rules$pattern[i])
+    res[idx[hit]] <- brand_rules$brand[i]; un[idx[hit]] <- FALSE
+  }
+  res
+}
+
+pos_lookup <- tibble(pos = unique(merged$pos)) %>%
+  mutate(
+    pos_brand = assign_brand_vec(normalize_pos(pos)),
+    pos_brand = if_else(pos_brand %in% c("Market (umumi)", "Magaza (umumi)"),
+                        "Diger", pos_brand)
+  )
+merged <- merged %>% left_join(pos_lookup, by = "pos")
+
+top_brands <- merged %>%
+  filter(pos_brand != "Diger") %>%
+  group_by(pos_brand) %>%
+  summarise(cem_satis = sum(total_sales, na.rm = TRUE),
+            orta_qebz = mean(total_sales, na.rm = TRUE)) %>%
+  arrange(desc(cem_satis)) %>%
+  slice_head(n = 10)
+
+ggplot(top_brands, aes(x = reorder(pos_brand, orta_qebz), y = orta_qebz)) +
+  geom_col(fill = "#378ADD") +
+  geom_text(aes(label = paste0(round(orta_qebz, 1), " AZN")),
+            hjust = -0.15, size = 3.5, color = "grey30") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Orta Qebz Deyeri Brend Uzre (Top 10 brend, satis hecmine gore)",
+       x = NULL, y = "Orta qebz setri deyeri (AZN)") +
+  theme_minimal(base_size = 13)
+
+```
+
+## slayd 5
+
+>
+
+```{r t5, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+normalize_pos <- function(x) {
+  x <- as.character(x); x <- toupper(x)
+  x <- str_replace_all(x, "\u018F", "E"); x <- str_replace_all(x, "\u011E", "G")
+  x <- str_replace_all(x, "\u0130", "I"); x <- str_replace_all(x, "\u015E", "S")
+  x <- str_replace_all(x, "\u00C7", "C"); x <- str_replace_all(x, "\u00D6", "O")
+  x <- str_replace_all(x, "\u00DC", "U")
+  x <- str_replace_all(x, "[^A-Z0-9 ]", " "); str_squish(x)
+}
+
+brand_rules <- tribble(
+  ~brand,            ~pattern,
+  "Araz",            "\\bARAZ\\b",
+  "Bravo",           "\\bBRAVO\\b",
+  "BazarStore",      "\\bBAZARSTORE\\b|\\bBAZAR STORE\\b",
+  "Oba",             "\\bOBA\\b",
+  "Spar",            "\\bSPAR\\b",
+  "King Smart",      "\\bKING ?SMART\\b",
+  "Bizim Market",    "\\bBIZIM MARKET\\b",
+  "Rahat Market",    "\\bRAHAT\\b",
+  "GrandMart",       "\\bGRAND ?MART\\b|\\bGRAND MARKET\\b",
+  "MegaStore",       "\\bMEGA ?STORE\\b",
+  "Neptun",          "\\bNEPTUN\\b",
+  "AvroMart",        "\\bAVROMART\\b",
+  "Qadiroglu",       "\\bQ[EA]DIROGLU\\b",
+  "Amine Market",    "\\bAMIN[EA]? MARKET\\b",
+  "En Ucuz",         "\\bEN UCUZ\\b",
+  "McDonalds",       "\\bMC ?DONALD",
+  "KFC",             "\\bKFC\\b",
+  "Premium",         "\\bPREMIUM\\b",
+  "Life Store",      "\\bLIFE STORE\\b|\\bLIFE CENTER\\b",
+  "Qayali",          "\\bQAYALI\\b",
+  "Sultan Market",   "\\bSULTAN MARKET\\b",
+  "A Plus",          "\\bA PLUS\\b",
+  "BolMart",         "\\bBOLMART\\b",
+  "Ekonom Market",   "\\bEKONOM MARKET\\b",
+  "Seda Store",      "\\bSEDA STORE\\b",
+  "Port Baku",       "\\bPORT BAKU\\b",
+  "Restoran",        "\\bRESTORAN\\b",
+  "Aptek",           "\\bAPTEK\\b",
+  "Erzaq Magazasi",  "\\bERZAQ MAGAZASI\\b",
+  "Magaza (umumi)",  "^MAGAZA$|\\bMAGAZASI\\b",
+  "Market (umumi)",  "\\bMARKET\\b"
+)
+
+assign_brand_vec <- function(nv) {
+  res <- rep("Diger", length(nv)); un <- rep(TRUE, length(nv))
+  for (i in seq_len(nrow(brand_rules))) {
+    idx <- which(un); if (length(idx) == 0) break
+    hit <- str_detect(nv[idx], brand_rules$pattern[i])
+    res[idx[hit]] <- brand_rules$brand[i]; un[idx[hit]] <- FALSE
+  }
+  res
+}
+
+# Brendi UNIKAL magaza adlari uzerinde tap (her ad = 1 magaza)
+pos_lookup <- tibble(pos = unique(merged$pos)) %>%
+  mutate(
+    pos_brand = assign_brand_vec(normalize_pos(pos)),
+    pos_brand = if_else(pos_brand %in% c("Market (umumi)", "Magaza (umumi)"),
+                        "Diger", pos_brand)
+  )
+
+store_count <- pos_lookup %>%
+  filter(pos_brand != "Diger") %>%
+  count(pos_brand, name = "magaza_sayi") %>%
+  arrange(desc(magaza_sayi)) %>%
+  slice_head(n = 10)
+
+ggplot(store_count, aes(x = reorder(pos_brand, magaza_sayi), y = magaza_sayi)) +
+  geom_col(fill = "#378ADD") +
+  geom_text(aes(label = magaza_sayi), hjust = -0.2, size = 3.5, color = "grey30") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Brend Uzre Unikal Magaza Sayi (Sebeke Boyukluyu, Top 10)",
+       x = NULL, y = "Unikal magaza sayi") +
+  theme_minimal(base_size = 13)
+
+```
+
+
+
+
+## slayd 6
+
+>
+
+```{r t6, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+top_products <- merged %>%
+  filter(!is.na(product_clean)) %>%
+  group_by(product_clean) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(satis)) %>%
+  slice_head(n = 15)
+
+# Sistem/ucot qeydi pattern-i (real mehsul deyil)
+junk_pattern <- paste0(
+  "SAT SRBST|SATISH|SRBST TICART|KREDIT|AVANS|UMUMI|^RZAQ$|GEYIMLRI|DD |MEBEL|",
+  "DERMAN|^DV |XSTDN|^SATIS$|EDV|MEHSUL|^ERZAQ$|RQMSAL|^MAL$|^MAGAZA$"
+)
+top_products <- top_products %>%
+  mutate(tip = if_else(str_detect(product_clean, junk_pattern),
+                       "Sistem qeydi", "Real mehsul"))
+
+ggplot(top_products, aes(x = reorder(product_clean, satis), y = satis, fill = tip)) +
+  geom_col() +
+  geom_text(aes(label = paste0(round(satis / 1e6, 1), "M")),
+            hjust = -0.15, size = 3.3, color = "grey30") +
+  coord_flip() +
+  scale_fill_manual(values = c("Real mehsul" = "#185FA5",
+                               "Sistem qeydi" = "#378ADD")) +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M"),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "En Cox 'Satilan' Mehsullar (Top 15, xam product_clean)",
+       subtitle = "Top siralarin coxu real mehsul deyil, sistem qeydidir (SAT SRBST, KREDIT, EDV...)",
+       x = NULL, y = "Satis (mln AZN)", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top")
+
+```
+
+
+
+## slayd 7
+
+>
+
+```{r t7, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+weekday_sales <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  filter(rec_date != as.Date("2024-04-19")) %>%   # backfill anomaliyasini cixar
+  mutate(
+    wd_num = wday(rec_date, week_start = 1),        # 1=B.ertesi ... 7=Bazar
+    wd_ad  = factor(wd_num, levels = 1:7,
+                    labels = c("B.ertesi","Cersenbe ax.","Cersenbe",
+                               "Cume ax.","Cume","Senbe","Bazar"))
+  ) %>%
+  group_by(wd_ad) %>%
+  summarise(
+    cem_satis = sum(total_sales, na.rm = TRUE),
+    gun_sayi  = n_distinct(rec_date),
+    .groups = "drop"
+  ) %>%
+  mutate(orta_gunluk = cem_satis / gun_sayi)
+
+ggplot(weekday_sales, aes(x = wd_ad, y = orta_gunluk, group = 1)) +
+  geom_line(color = "#378ADD", linewidth = 1.2) +
+  geom_point(color = "#185FA5", size = 3) +
+  geom_text(aes(label = paste0(round(orta_gunluk / 1e6, 1), "M")),
+            vjust = -1, size = 3.5, color = "grey30") +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M"),
+                     expand = expansion(mult = c(0.08, 0.15))) +
+  labs(title = "Heftenin Gunu Uzre Ortalama Gunluk Satis",
+       subtitle = "19 aprel (backfill anomaliyasi) cixarilib",
+       x = NULL, y = "Ortalama gunluk satis (mln AZN)") +
+  theme_minimal(base_size = 13)
+
+
+```
+
+
+
+
+## slayd 8
+
+>
+
+```{r t8, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Gunluk qeyd sayi
+daily_cnt <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  count(rec_date, name = "qeyd_sayi")
+
+# 19 apreli isaretle
+daily_cnt <- daily_cnt %>%
+  mutate(anomaliya = if_else(rec_date == as.Date("2024-04-19"),
+                             "19 aprel (backfill)", "Normal gun"))
+
+ggplot(daily_cnt, aes(x = rec_date, y = qeyd_sayi, fill = anomaliya)) +
+  geom_col() +
+  scale_fill_manual(values = c("19 aprel (backfill)" = "#D64550",
+                               "Normal gun" = "#378ADD")) +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 days") +
+  labs(title = "Gunluk Qeyd Sayi: 19 Aprel Anomaliyasi",
+       x = NULL, y = "Qeyd sayi (mln)", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+## slayd 9
+
+>
+
+```{r t9, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Gunluk qeyd sayi -> 20-31 may araligi
+daily_cnt <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  count(rec_date, name = "qeyd_sayi") %>%
+  filter(rec_date >= as.Date("2024-05-20"),
+         rec_date <= as.Date("2024-05-31")) %>%
+  # bos gunleri (28-30 may) 0 ile doldur ki, boluq gorunsun
+  complete(rec_date = seq(as.Date("2024-05-20"), as.Date("2024-05-31"), by = "day"),
+           fill = list(qeyd_sayi = 0))
+
+# Anomal gunleri isaretle (25-30 may)
+daily_cnt <- daily_cnt %>%
+  mutate(tip = if_else(rec_date >= as.Date("2024-05-25") &
+                         rec_date <= as.Date("2024-05-30"),
+                       "Anomal (boluq)", "Normal gun"))
+
+ggplot(daily_cnt, aes(x = rec_date, y = qeyd_sayi, fill = tip)) +
+  geom_col() +
+  geom_text(aes(label = comma(qeyd_sayi)), vjust = -0.5, size = 3, color = "grey30") +
+  scale_fill_manual(values = c("Anomal (boluq)" = "#D64550",
+                               "Normal gun" = "#378ADD")) +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "K"),
+                     expand = expansion(mult = c(0, 0.15))) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "1 day") +
+  labs(title = "May Sonu Data Boslugu Anomaliyasi",
+       x = NULL, y = "Qeyd sayi (min)", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+  
+```
+
+## slayd 10
+
+> 
+
+```{r t10, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(stringr)
+library(knitr)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Invalid UTF-8 baytlari temizle (kable ve str_detect xetalarinin qarsisi)
+merged$product_clean <- iconv(merged$product_clean, "UTF-8", "UTF-8", sub = "")
+merged$pos           <- iconv(merged$pos, "UTF-8", "UTF-8", sub = "")
+
+# Sistem/ucot zibili filtri (real mehsullara fokuslan)
+junk <- "SAT|SATIS|SRBST|TICART|KREDIT|AVANS|UMUMI|RZAQ|MEHSUL|PAKET|^DV |EDV|QIDA|MAL|GNDLIK|DERMAN|MALLAR|TLBAT"
+
+anomaly_tbl <- merged %>%
+  filter(!is.na(product_clean), !is.na(unit_price),
+         unit_price > 0, unit_price < 10000,
+         !str_detect(product_clean, junk)) %>%
+  group_by(product_clean) %>%
+  filter(n() >= 500) %>%                     # statistik etibarli olmasi ucun
+  mutate(orta_qiymet = mean(unit_price),
+         nisbet      = unit_price / orta_qiymet) %>%
+  ungroup() %>%
+  arrange(desc(nisbet)) %>%
+  distinct(product_clean, .keep_all = TRUE) %>%   # her mehsuldan 1 (en ekstremal)
+  slice_head(n = 8) %>%
+  transmute(
+    Mehsul       = str_to_sentence(product_clean),
+    `Bu magaza`  = paste0(round(unit_price, 1), " AZN"),
+    `Orta qiymet`= paste0(round(orta_qiymet, 2), " AZN"),
+    `Ferq`       = paste0(round(nisbet), "x"),
+    Magaza       = str_to_title(tolower(pos))
+  )
+
+kable(anomaly_tbl,
+      caption = "Eyni mehsulun orta qiymetinden kekin kenara cixan qeydler (qiymet giris xetalari)")
+
+```
+
+
+
+## slayd 11
+
+> 
+
+```{r t11, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(knitr)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Invalid UTF-8 temizle
+merged$product_clean <- iconv(merged$product_clean, "UTF-8", "UTF-8", sub = "")
+merged$pos           <- iconv(merged$pos, "UTF-8", "UTF-8", sub = "")
+
+qnt_outliers <- merged %>%
+  arrange(desc(qnt)) %>%
+  slice_head(n = 10) %>%
+  transmute(
+    Mehsul       = substr(trimws(product_clean), 1, 25),
+    `Miqdar (qnt)` = format(round(qnt), big.mark = " "),
+    `Qiymet`     = paste0(round(unit_price, 2), " AZN"),
+    Magaza       = substr(trimws(pos), 1, 25)
+  )
+
+kable(qnt_outliers,
+      caption = "En boyuk miqdar qeydleri - hamisinda qiymet 1.01 AZN (sahe yerdeyismesi xetasi)")
+
+# --- Konteks: qnt paylanmasi (danisiq ucun) ---
+cat("\n\nqnt paylanmasi:\n")
+merged %>%
+  summarise(
+    `qnt 2-10 (%)`    = round(100 * mean(qnt >= 2 & qnt <= 10), 1),
+    `qnt 10-100 (%)`  = round(100 * mean(qnt > 10 & qnt <= 100), 2),
+    `qnt > 1000 (%)`  = round(100 * mean(qnt > 1000), 4),
+    `max qnt`         = max(qnt, na.rm = TRUE)
+  ) %>%
+  print()
+
+```
+
+## slayd 12
+
+> 
+
+```{r t12, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Gunluk satis
+daily <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  group_by(rec_date) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE), .groups = "drop") %>%
+  arrange(rec_date)
+
+# Anomal gunleri cixar (19 apr + 25-31 may)
+daily_clean <- daily %>%
+  filter(rec_date != as.Date("2024-04-19"),
+         !(rec_date >= as.Date("2024-05-25") & rec_date <= as.Date("2024-05-31")))
+
+orta <- mean(daily_clean$satis)
+
+# Statistik trend testi (danisiq ucun konsola)
+daily_clean$t <- seq_len(nrow(daily_clean))
+fit <- lm(satis ~ t, data = daily_clean)
+cat("Trend p-value:", round(summary(fit)$coefficients[2,4], 3),
+    "| R2:", round(summary(fit)$r.squared, 3),
+    "| orta gunluk satis:", round(orta), "AZN\n")
+
+ggplot(daily_clean, aes(x = rec_date, y = satis)) +
+  geom_line(color = "#378ADD", linewidth = 0.9) +
+  geom_point(color = "#185FA5", size = 1.8) +
+  geom_hline(yintercept = orta, color = "#D64550",
+             linetype = "dashed", linewidth = 0.8) +
+  annotate("text", x = min(daily_clean$rec_date), y = orta,
+           label = paste0("Orta: ", round(orta/1e6, 1), "M"),
+           hjust = -0.1, vjust = -0.6, color = "#D64550", size = 3.5) +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M"),
+                     limits = c(0, NA)) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 days") +
+  labs(title = "Temiz Gunluk Satis (Anomal Gunler Cixarilmis)",
+       subtitle = "Statistik ehemiyyetli trend yoxdur (p=0.33) - satis orta 3.1M etrafinda dalgalanir",
+       x = NULL, y = "Satis (mln AZN)") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+## slayd 13
+
+> 
+
+```{r t13, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+
+# Temiz gunluk satis (anomal gunler cixarilmis)
+daily_clean <- merged %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  group_by(rec_date) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE), .groups = "drop") %>%
+  filter(rec_date != as.Date("2024-04-19"),
+         !(rec_date >= as.Date("2024-05-25") & rec_date <= as.Date("2024-05-31"))) %>%
+  arrange(rec_date) %>%
+  mutate(tip = "Tarixi")
+
+orta <- mean(daily_clean$satis)
+std  <- sd(daily_clean$satis)
+
+
+son_tarix <- max(daily_clean$rec_date)
+son_qiymet <- daily_clean$satis[daily_clean$rec_date == son_tarix]
+
+forecast_df <- tibble(
+  rec_date = c(son_tarix, seq(son_tarix + 1, son_tarix + 7, by = "day")),
+  satis    = c(son_qiymet, rep(orta, 7)),
+  asagi    = c(son_qiymet, rep(orta - std, 7)),
+  yuxari   = c(son_qiymet, rep(orta + std, 7))
+)
+
+ggplot() +
+  # proqnoz zolagi (en altda)
+  geom_ribbon(data = forecast_df,
+              aes(x = rec_date, ymin = asagi, ymax = yuxari),
+              fill = "#D64550", alpha = 0.15) +
+  # tarixi data
+  geom_line(data = daily_clean, aes(x = rec_date, y = satis),
+            color = "#378ADD", linewidth = 0.9) +
+  geom_point(data = daily_clean, aes(x = rec_date, y = satis),
+             color = "#185FA5", size = 1.6) +
+  # proqnoz xetti (en ustde, qalin ve aydin)
+  geom_line(data = forecast_df, aes(x = rec_date, y = satis),
+            color = "#D64550", linetype = "dashed", linewidth = 1.4) +
+  geom_point(data = forecast_df, aes(x = rec_date, y = satis),
+             color = "#D64550", size = 2.2) +
+  scale_y_continuous(labels = label_number(scale = 1e-6, suffix = "M"),
+                     limits = c(0, NA)) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 days") +
+  labs(title = "Qisamuddetli Proqnoz: Novbeti 7 Gun ~3.1M AZN/gun",
+       subtitle = "Trend olmadigi ucun sabit seviyye proqnozu | zolaq: orta +/- 1 std",
+       x = NULL, y = "Satis (mln AZN)") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+
+## slayd 14
+
+> 
+
+```{r t14, error=FALSE,message=FALSE, warning=FALSE,echo=TRUE,include=TRUE}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+setwd("C:/RR")
+
+
+merged <- readRDS("merged_data.rds")
+merged$pos <- iconv(merged$pos, "UTF-8", "UTF-8", sub = "")
+
+araz_daily <- merged %>%
+  filter(grepl("\\bARAZ\\b", toupper(pos), perl = TRUE)) %>%
+  mutate(rec_date = as.Date(rec_date)) %>%
+  group_by(rec_date) %>%
+  summarise(satis = sum(total_sales, na.rm = TRUE), .groups = "drop") %>%
+  filter(rec_date != as.Date("2024-04-19"),
+         !(rec_date >= as.Date("2024-05-25") & rec_date <= as.Date("2024-05-31"))) %>%
+  arrange(rec_date)
+
+orta <- mean(araz_daily$satis)
+std  <- sd(araz_daily$satis)
+
+araz_daily$t <- seq_len(nrow(araz_daily))
+fit <- lm(satis ~ t, data = araz_daily)
+cat("Araz trend p-value:", round(summary(fit)$coefficients[2,4], 3),
+    "| R2:", round(summary(fit)$r.squared, 3),
+    "| orta gunluk satis:", round(orta), "AZN\n")
+
+son_tarix <- max(araz_daily$rec_date)
+son_qiymet <- araz_daily$satis[araz_daily$rec_date == son_tarix]
+
+forecast_df <- tibble(
+  rec_date = c(son_tarix, seq(son_tarix + 1, son_tarix + 7, by = "day")),
+  satis    = c(son_qiymet, rep(orta, 7)),
+  asagi    = c(son_qiymet, rep(orta - std, 7)),
+  yuxari   = c(son_qiymet, rep(orta + std, 7))
+)
+
+ggplot() +
+  geom_ribbon(data = forecast_df,
+              aes(x = rec_date, ymin = asagi, ymax = yuxari),
+              fill = "#D64550", alpha = 0.15) +
+  geom_line(data = araz_daily, aes(x = rec_date, y = satis),
+            color = "#378ADD", linewidth = 0.9) +
+  geom_point(data = araz_daily, aes(x = rec_date, y = satis),
+             color = "#185FA5", size = 1.6) +
+  geom_line(data = forecast_df, aes(x = rec_date, y = satis),
+            color = "#D64550", linetype = "dashed", linewidth = 1.4) +
+  geom_point(data = forecast_df, aes(x = rec_date, y = satis),
+             color = "#D64550", size = 2.2) +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "K"),
+                     limits = c(0, NA)) +
+  scale_x_date(date_labels = "%d %b", date_breaks = "5 days") +
+  labs(title = "Araz Brendi Ucun Qisamuddetli Proqnoz",
+       subtitle = "Trend yoxdur (p=0.48) - umumi bazar pattern-i burada da tesdiqlenir",
+       x = NULL, y = "Gunluk satis (min AZN)") +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+
+
+
+
+
+
